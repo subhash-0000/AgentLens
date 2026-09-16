@@ -1,0 +1,5 @@
+.env
+traces/*.jsonl
+reports/*.md
+__pycache__/
+*.pyc
