@@ -18,6 +18,11 @@ def main() -> None:
     assert all(len(event.input_summary) <= 200 for event in load_trace("capture_test_002"))
     callback = AgentLensCallback("capture_test_003", "traces")
     callback.on_llm_end(None, run_id="capture_test_003")
+    assert callback._llm_name({"name": "ChatGroq", "kwargs": {"model_name": "openai/gpt-oss-20b"}}, {}) == "openai/gpt-oss-20b"
+    assert callback._llm_name({"name": "ChatGroq"}, {"metadata": {"ls_model_name": "qwen/qwen3.8-27b"}}) == "qwen/qwen3.8-27b"
+    callback.on_chain_start(None, "", run_id="chain-1", name="QuestionGenerator")
+    callback.on_chain_error(RuntimeError("chain failed"), run_id="chain-1")
+    assert load_trace("capture_test_003")[-1].name == "QuestionGenerator"
     for run_id in ("capture_test_001", "capture_test_002", "capture_test_003"):
         path = f"traces/{run_id}.jsonl"
         if os.path.exists(path):

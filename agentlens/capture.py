@@ -70,13 +70,22 @@ class AgentLensCallback(BaseCallbackHandler):
             key = self._run_key(run_id)
             self._started_at[key] = time.perf_counter()
             self._pending_inputs[key] = self._summary(prompts)
-            self._pending_names[key] = self._llm_name(serialized)
+            self._pending_names[key] = self._llm_name(serialized, kwargs)
         except Exception as exc:
             print(f"AgentLens callback warning: {exc}", file=sys.stderr)
 
     def on_chat_model_start(self, serialized: dict[str, Any], messages: list[Any], run_id: UUID, **kwargs: Any) -> None:
         """Record a chat-model start using the same timer and state as an LLM start."""
         self.on_llm_start(serialized, messages, run_id, **kwargs)
+
+    def on_chain_start(self, serialized: dict[str, Any] | None, inputs: Any, run_id: UUID, **kwargs: Any) -> None:
+        """Inspect chain metadata; chain-level names may be limited by LangChain callbacks."""
+        try:
+            name = self._chain_name(serialized, kwargs)
+            if name:
+                self._pending_names[self._run_key(run_id)] = name
+        except Exception as exc:
+            print(f"AgentLens callback warning: {exc}", file=sys.stderr)
 
     def on_llm_end(self, response: Any, run_id: UUID, **kwargs: Any) -> None:
         """Record an LLM completion with token usage when available."""
@@ -116,7 +125,8 @@ class AgentLensCallback(BaseCallbackHandler):
         """Record a chain error as an error event while allowing the chain to fail normally."""
         try:
             key = self._run_key(run_id)
-            self._record_safely(self._event("error", self._pending_names.get(key, "chain"), self._pending_inputs.get(key, ""), error=str(error), duration_ms=self._duration(key)))
+            name = self._pending_names.get(key) or self._chain_name(None, kwargs) or "chain"
+            self._record_safely(self._event("error", name, self._pending_inputs.get(key, ""), error=str(error), duration_ms=self._duration(key)))
         except Exception as exc:
             print(f"AgentLens callback warning: {exc}", file=sys.stderr)
 
@@ -128,8 +138,30 @@ class AgentLensCallback(BaseCallbackHandler):
         return None if started is None else int((time.perf_counter() - started) * 1000)
 
     @staticmethod
-    def _llm_name(serialized: dict[str, Any]) -> str:
-        """Extract an LLM name from LangChain metadata, or mark it unknown."""
+    def _llm_name(serialized: dict[str, Any] | None, callback_kwargs: dict[str, Any]) -> str:
+        """Extract an agent tag plus provider model ID, falling back to model metadata."""
+        serialized = serialized or {}
+        serialized_kwargs = serialized.get("kwargs") or {}
+        metadata = callback_kwargs.get("metadata") or {}
+        invocation_params = callback_kwargs.get("invocation_params") or {}
+        tags = callback_kwargs.get("tags") or []
+        custom_tags = [str(tag) for tag in tags if not str(tag).startswith("seq:")]
+        agent_name = custom_tags[-1] if custom_tags else None
+        model_name = None
+        for source in (serialized_kwargs, metadata, invocation_params):
+            for key in ("model", "model_name", "ls_model_name"):
+                value = source.get(key) if isinstance(source, dict) else None
+                if value:
+                    model_name = str(value)
+                    break
+            if model_name:
+                break
+        if agent_name and model_name:
+            return f"{agent_name} ({model_name})"
+        if agent_name:
+            return agent_name
+        if model_name:
+            return model_name
         name = serialized.get("name")
         if name:
             return str(name)
@@ -139,6 +171,18 @@ class AgentLensCallback(BaseCallbackHandler):
         if identifiers:
             return str(identifiers)
         return "unknown_model"
+
+    @staticmethod
+    def _chain_name(serialized: dict[str, Any] | None, callback_kwargs: dict[str, Any]) -> str | None:
+        """Extract a chain name or tag; LangChain may provide no richer chain identity."""
+        serialized = serialized or {}
+        name = serialized.get("name") or callback_kwargs.get("name")
+        if name:
+            return str(name)
+        # LangChain may expose only generic sequence metadata here; custom invocation tags are the useful fallback.
+        tags = callback_kwargs.get("tags") or []
+        custom_tags = [str(tag) for tag in tags if not str(tag).startswith("seq:")]
+        return custom_tags[-1] if custom_tags else None
 
     @staticmethod
     def _token_usage(response: Any, llm_output: object) -> dict[str, Any]:

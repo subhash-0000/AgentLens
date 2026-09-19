@@ -9,6 +9,8 @@ from typing import Any
 from .cost import cost_by_step, total_cost_for_run
 from .trace_schema import TraceEvent, load_trace
 
+HIGH_COST_MULTIPLIER = 2.5
+
 
 def generate_report(run_id: str, use_llm: bool = True, traces_dir: str = "traces") -> str:
     """Load a run and return a complete Markdown audit, gracefully handling missing traces."""
@@ -59,11 +61,13 @@ def _event_cost(event: TraceEvent) -> float:
 def _anomalies(events: list[TraceEvent], total_cost: float) -> list[str]:
     """Find slow, expensive, or failed steps in a trace."""
     anomalies: list[str] = []
+    cost_events = [event for event in events if event.event_type == "llm_call" and _event_cost(event) > 0]
+    average_cost = total_cost / len(cost_events) if len(cost_events) >= 2 else None
     for event in events:
         if event.duration_ms is not None and event.duration_ms > 5000:
             anomalies.append(f"Slow step: {event.name} took {event.duration_ms}ms.")
-        if total_cost and _event_cost(event) > total_cost * 0.2:
-            anomalies.append(f"High-cost step: {event.name} used more than 20% of total cost.")
+        if average_cost is not None and _event_cost(event) > average_cost * HIGH_COST_MULTIPLIER:
+            anomalies.append(f"High-cost step: {event.name} cost more than {HIGH_COST_MULTIPLIER}x the average step cost.")
         if event.error:
             anomalies.append(f"Error in {event.name}: {event.error}")
     return anomalies

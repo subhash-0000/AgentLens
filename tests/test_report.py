@@ -20,6 +20,14 @@ def main() -> None:
     assert "Anomal" in report and "web_search" in report
     assert "no trace" in generate_report("run_id_that_does_not_exist", use_llm=False).lower()
     os.remove(f"traces/{run_id}.jsonl")
+    close_costs = [0.001, 0.0012, 0.0009, 0.0011]
+    lopsided_costs = [0.001, 0.001, 0.001, 0.005]
+    for name, costs, expected in (("close", close_costs, 0), ("lopsided", lopsided_costs, 1)):
+        synthetic_events = [TraceEvent(name, str(index), "llm_call", "openai/gpt-oss-20b", "", "", 0, int(cost / 0.0003 * 1000), 10, None) for index, cost in enumerate(costs)]
+        from agentlens.report import _anomalies, total_cost_for_run
+        anomalies = [item for item in _anomalies(synthetic_events, total_cost_for_run(synthetic_events)) if "High-cost" in item]
+        assert len(anomalies) == expected, (name, anomalies)
+        print(f"{name} cost anomaly test: PASS ({len(anomalies)} high-cost anomalies)")
     print("ALL REPORT TESTS PASSED")
 
 
