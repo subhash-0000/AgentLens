@@ -28,11 +28,21 @@ def generate_report(run_id: str, use_llm: bool = True, traces_dir: str = "traces
         lines.extend(["## What Happened", narrative, ""])
 
     lines.extend(["## Step-by-step timeline", ""])
+    event_names = {event.langchain_run_id: event.name for event in events if event.langchain_run_id}
     for event in events:
         cost = _event_cost(event)
         duration = "?" if event.duration_ms is None else str(event.duration_ms)
         detail = f"; error: {event.error}" if event.error else ""
-        lines.append(f"- [{event.timestamp}] {event.event_type}: {event.name} - {duration}ms, ${cost:.6f}{detail}")
+        relationship = ""
+        if event.langchain_run_id:
+            relationship = f" (run_id={event.langchain_run_id}"
+            if event.parent_run_id:
+                parent_name = event_names.get(event.parent_run_id)
+                relationship += f"; parent_run_id={event.parent_run_id}"
+                if parent_name:
+                    relationship += f" [{parent_name}]"
+            relationship += ")"
+        lines.append(f"- [{event.timestamp}] {event.event_type}: {event.name}{relationship} - {duration}ms, ${cost:.6f}{detail}")
     lines.append("")
 
     lines.extend(["## Most expensive steps", ""])

@@ -9,6 +9,14 @@ def main() -> None:
     restored = from_jsonl_line(to_jsonl_line(event))
     assert restored.run_id == event.run_id
     assert restored.tokens_in == 5
+    related = TraceEvent("r", "t", "tool_call", "tool", "in", "out", None, None, 4, None, "child", "parent")
+    related_restored = from_jsonl_line(to_jsonl_line(related))
+    assert related_restored.langchain_run_id == "child"
+    assert related_restored.parent_run_id == "parent"
+    old_line = '{"run_id":"old","timestamp":"t","event_type":"llm_call","name":"gpt-4","input_summary":"","output_summary":"","tokens_in":1,"tokens_out":2,"duration_ms":3,"error":null}'
+    old_restored = from_jsonl_line(old_line)
+    assert old_restored.langchain_run_id is None
+    assert old_restored.parent_run_id is None
     assert load_trace("nonexistent_run_id_xyz") == []
     long_event = TraceEvent("t", "x", "tool_call", "search", "x" * 500, "y" * 500, None, None, None, None)
     assert len(long_event.input_summary) <= 200

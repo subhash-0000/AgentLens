@@ -20,6 +20,16 @@ def main() -> None:
     assert "Anomal" in report and "web_search" in report
     assert "no trace" in generate_report("run_id_that_does_not_exist", use_llm=False).lower()
     os.remove(f"traces/{run_id}.jsonl")
+    relationship_events = [
+        TraceEvent("relationship", "t", "chain", "Agent", "", "", None, None, None, None, "parent", None),
+        TraceEvent("relationship", "t", "tool_call", "tool", "", "", None, None, 1, None, "child", "parent"),
+    ]
+    with open("traces/report_relationship.jsonl", "w", encoding="utf-8") as trace_file:
+        for event in relationship_events:
+            trace_file.write(to_jsonl_line(event) + "\n")
+    relationship_report = generate_report("report_relationship", use_llm=False)
+    assert "parent_run_id=parent [Agent]" in relationship_report
+    os.remove("traces/report_relationship.jsonl")
     close_costs = [0.001, 0.0012, 0.0009, 0.0011]
     lopsided_costs = [0.001, 0.001, 0.001, 0.005]
     for name, costs, expected in (("close", close_costs, 0), ("lopsided", lopsided_costs, 1)):

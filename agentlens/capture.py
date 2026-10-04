@@ -24,6 +24,7 @@ class AgentLensCallback(BaseCallbackHandler):
         self._started_at: dict[str, float] = {}
         self._pending_inputs: dict[str, str] = {}
         self._pending_names: dict[str, str] = {}
+        self._pending_langchain_ids: dict[str, tuple[str | None, str | None]] = {}
 
     @staticmethod
     def _run_key(run_id: UUID | str | None) -> str:
@@ -49,7 +50,7 @@ class AgentLensCallback(BaseCallbackHandler):
         except Exception as exc:  # Callback failures must never escape to user code.
             print(f"AgentLens callback warning: {exc}", file=sys.stderr)
 
-    def _event(self, event_type: str, name: str, input_summary: str = "", output_summary: str = "", tokens_in: int | None = None, tokens_out: int | None = None, duration_ms: int | None = None, error: str | None = None) -> TraceEvent:
+    def _event(self, event_type: str, name: str, input_summary: str = "", output_summary: str = "", tokens_in: int | None = None, tokens_out: int | None = None, duration_ms: int | None = None, error: str | None = None, langchain_run_id: str | None = None, parent_run_id: str | None = None) -> TraceEvent:
         """Build a trace event with the current UTC timestamp and bounded fields."""
         return TraceEvent(
             run_id=self.run_id,
@@ -62,6 +63,8 @@ class AgentLensCallback(BaseCallbackHandler):
             tokens_out=tokens_out,
             duration_ms=duration_ms,
             error=error,
+            langchain_run_id=langchain_run_id,
+            parent_run_id=parent_run_id,
         )
 
     def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], run_id: UUID, **kwargs: Any) -> None:
@@ -71,6 +74,7 @@ class AgentLensCallback(BaseCallbackHandler):
             self._started_at[key] = time.perf_counter()
             self._pending_inputs[key] = self._summary(prompts)
             self._pending_names[key] = self._llm_name(serialized, kwargs)
+            self._pending_langchain_ids[key] = self._callback_ids(run_id, kwargs)
         except Exception as exc:
             print(f"AgentLens callback warning: {exc}", file=sys.stderr)
 
@@ -84,6 +88,7 @@ class AgentLensCallback(BaseCallbackHandler):
             name = self._chain_name(serialized, kwargs)
             if name:
                 self._pending_names[self._run_key(run_id)] = name
+            self._pending_langchain_ids[self._run_key(run_id)] = self._callback_ids(run_id, kwargs)
         except Exception as exc:
             print(f"AgentLens callback warning: {exc}", file=sys.stderr)
 
@@ -95,9 +100,10 @@ class AgentLensCallback(BaseCallbackHandler):
             usage = self._token_usage(response, llm_output)
             name = self._pending_names.get(key, "unknown_model")
             input_summary = self._pending_inputs.get(key, "")
+            langchain_run_id, parent_run_id = self._event_ids(key, run_id, kwargs)
             duration = self._duration(key)
             output = self._summary(response)
-            self._record_safely(self._event("llm_call", name, input_summary, output, _int_or_none(usage.get("prompt_tokens") or usage.get("input_tokens") or usage.get("prompt_token_count")), _int_or_none(usage.get("completion_tokens") or usage.get("output_tokens") or usage.get("completion_token_count")), duration))
+            self._record_safely(self._event("llm_call", name, input_summary, output, _int_or_none(usage.get("prompt_tokens") or usage.get("input_tokens") or usage.get("prompt_token_count")), _int_or_none(usage.get("completion_tokens") or usage.get("output_tokens") or usage.get("completion_token_count")), duration, langchain_run_id=langchain_run_id, parent_run_id=parent_run_id))
         except Exception as exc:
             print(f"AgentLens callback warning: {exc}", file=sys.stderr)
 
@@ -108,6 +114,7 @@ class AgentLensCallback(BaseCallbackHandler):
             self._started_at[key] = time.perf_counter()
             self._pending_inputs[key] = self._summary(input_str)
             self._pending_names[key] = str(serialized.get("name") or serialized.get("id") or "tool")
+            self._pending_langchain_ids[key] = self._callback_ids(run_id, kwargs)
         except Exception as exc:
             print(f"AgentLens callback warning: {exc}", file=sys.stderr)
 
@@ -117,7 +124,8 @@ class AgentLensCallback(BaseCallbackHandler):
             key = self._run_key(run_id)
             name = self._pending_names.get(key, "tool")
             input_summary = self._pending_inputs.get(key, "")
-            self._record_safely(self._event("tool_call", name, input_summary, self._summary(output), duration_ms=self._duration(key)))
+            langchain_run_id, parent_run_id = self._event_ids(key, run_id, kwargs)
+            self._record_safely(self._event("tool_call", name, input_summary, self._summary(output), duration_ms=self._duration(key), langchain_run_id=langchain_run_id, parent_run_id=parent_run_id))
         except Exception as exc:
             print(f"AgentLens callback warning: {exc}", file=sys.stderr)
 
@@ -126,7 +134,8 @@ class AgentLensCallback(BaseCallbackHandler):
         try:
             key = self._run_key(run_id)
             name = self._pending_names.get(key) or self._chain_name(None, kwargs) or "chain"
-            self._record_safely(self._event("error", name, self._pending_inputs.get(key, ""), error=str(error), duration_ms=self._duration(key)))
+            langchain_run_id, parent_run_id = self._event_ids(key, run_id, kwargs)
+            self._record_safely(self._event("error", name, self._pending_inputs.get(key, ""), error=str(error), duration_ms=self._duration(key), langchain_run_id=langchain_run_id, parent_run_id=parent_run_id))
         except Exception as exc:
             print(f"AgentLens callback warning: {exc}", file=sys.stderr)
 
@@ -135,7 +144,24 @@ class AgentLensCallback(BaseCallbackHandler):
         started = self._started_at.pop(key, None)
         self._pending_inputs.pop(key, None)
         self._pending_names.pop(key, None)
+        self._pending_langchain_ids.pop(key, None)
         return None if started is None else int((time.perf_counter() - started) * 1000)
+
+    @staticmethod
+    def _callback_ids(run_id: UUID | str | None, callback_kwargs: dict[str, Any]) -> tuple[str | None, str | None]:
+        """Return LangChain's per-invocation run ID and its parent ID from callback data."""
+        callback_run_id = callback_kwargs.get("run_id") or run_id
+        parent_run_id = callback_kwargs.get("parent_run_id")
+        return (
+            None if callback_run_id is None else str(callback_run_id),
+            None if parent_run_id is None else str(parent_run_id),
+        )
+
+    def _event_ids(self, key: str, run_id: UUID | str | None, callback_kwargs: dict[str, Any]) -> tuple[str | None, str | None]:
+        """Resolve stored start IDs and merge any parent ID supplied on an end/error callback."""
+        stored_run_id, stored_parent_id = self._pending_langchain_ids.get(key, (None, None))
+        current_run_id, current_parent_id = self._callback_ids(run_id, callback_kwargs)
+        return stored_run_id or current_run_id, stored_parent_id or current_parent_id
 
     @staticmethod
     def _llm_name(serialized: dict[str, Any] | None, callback_kwargs: dict[str, Any]) -> str:
@@ -176,13 +202,13 @@ class AgentLensCallback(BaseCallbackHandler):
     def _chain_name(serialized: dict[str, Any] | None, callback_kwargs: dict[str, Any]) -> str | None:
         """Extract a chain name or tag; LangChain may provide no richer chain identity."""
         serialized = serialized or {}
-        name = serialized.get("name") or callback_kwargs.get("name")
-        if name:
-            return str(name)
         # LangChain may expose only generic sequence metadata here; custom invocation tags are the useful fallback.
         tags = callback_kwargs.get("tags") or []
         custom_tags = [str(tag) for tag in tags if not str(tag).startswith("seq:")]
-        return custom_tags[-1] if custom_tags else None
+        if custom_tags:
+            return custom_tags[-1]
+        name = serialized.get("name") or callback_kwargs.get("name")
+        return str(name) if name else None
 
     @staticmethod
     def _token_usage(response: Any, llm_output: object) -> dict[str, Any]:

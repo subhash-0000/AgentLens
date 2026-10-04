@@ -29,6 +29,8 @@ class TraceEvent:
     tokens_out: int | None
     duration_ms: int | None
     error: str | None
+    langchain_run_id: str | None = None
+    parent_run_id: str | None = None
 
     def __post_init__(self) -> None:
         """Truncate summaries and normalize optional error text after construction."""
